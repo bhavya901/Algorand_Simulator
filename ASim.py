@@ -44,18 +44,20 @@ class Barrier:
 
 
 genblock = Block(bytes(32), bytes(32), 1,"We are building the best Algorand Discrete Event Simulator".encode("utf-8"))
-N = 512 # number of node
+N = 10 # number of node
 gblprng, glbround = random.Random(), 1
 node = []
 mu_blk, sigma_blk, mu_nonblk, sigma_nonblk = 200, 400, 30, 64
-tau_proposer, tau_step, tau_final = 20, 60, 60 # TODO
-lambda_proposer, lambda_blk, lambda_step =  5,30, 8
+tau_proposer, tau_step, tau_final = 20, 20, 20 # TODO
+lambda_proposer, lambda_blk, lambda_step =  10, 10, 10
 threshold_step, threshold_final = 0.67, 0.67 # TODO
 sum_stakes = 0
 MAXSTEPS = 15
 brexit = False
 barrier = Barrier()
 temp_threads = queue.Queue(0)
+byz_mesg = [None, None, 0]
+byz_sem = Semaphore(1)
 
 def calc_SHA256(s):
 	# s = bytes
@@ -394,8 +396,8 @@ class Node:
 				else: 
 					r = blkhash
 			self.rinfo.step += 1
-
-		assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
+		return 0
+		# assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
 
 	def node_main(self):
 		global barrier
@@ -411,9 +413,11 @@ class Node:
 			if (j>0):
 				mesg = self.gen_prio_mesg(vrf_output, j, hp)
 				self.gossip(mesg)
+				# print ("{} is proposer for round {}".format(self.nid, self.rinfo.round_num))
 			time.sleep(lambda_proposer)
 			# update to maxprio will stop as lambda proposer has passed in sleep. 
 			if (j>0 and hp <= self.rinfo.maxprio):
+				# print ("highest priority in round {} is {} by {} accd to {}".format(self.rinfo.round_num, self.rinfo.maxprio, self.rinfo.mpuid, self.nid))
 				mesg = self.gen_blk_mesg(vrf_output, j, hp)
 				self.gossip(mesg)
 			time.sleep(lambda_blk)
@@ -434,7 +438,7 @@ class Node:
 			print("\nBlock proposal messages received during round {}".format(self.rinfo.round_num), file=self.f)
 			for key, val in self.rinfo.blk_recv.items():
 				print("block hash = {}, priority = {}, prevhash = {} by {}".format(key[0:8], val[0].prio_pl.priority, val[0].prevhash[0:8], val[1]), file=self.f)
-			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else "TENTATIVE", hblock_, self.rinfo.round_num), file=self.f, flush=True)
+			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=0 else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
 			self.rsem.acquire()
 			self.blockchain.append(blk)
 			if hblock_ == bytes(32):
@@ -468,6 +472,301 @@ class Node:
 		self.mesg_seq+=1
 		# self.rsem.release()
 		return mesg
+
+class FailStop(Node):
+
+	def __init__(self, nid):
+		Node.__init__(self, nid)
+
+	def reduction(self, blkhash, stop=False):
+		global tau_step, threshold_step
+		if not stop:
+			self.committeeVote(tau_step, blkhash)
+		h1hash = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step+lambda_blk) # TODO confirm the wait time in paper/assign
+		if h1hash == -1:
+			h1hash = bytes(32)
+		self.rinfo.step += 1
+		if not stop:
+			self.committeeVote(tau_step, h1hash)
+		h2hash = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step) # TODO above
+		self.rinfo.step += 1
+		if h2hash==-1:
+			return bytes(32)
+		return h2hash
+
+	def binaryBA(self, blkhash, stop=False):
+		global MAXSTEPS
+		assert(self.rinfo.step == 3), "error assertion round Number is "+str(self.rinfo.step)
+		r = blkhash
+		empty_hash = bytes(32)
+		while(self.rinfo.step < MAXSTEPS+3):
+			if not stop:
+				self.committeeVote(tau_step, r)
+			r = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step)
+			if r== -1:
+				r = blkhash
+			elif r != empty_hash:
+				if self.rinfo.step == 3:
+					self.rinfo.step = MAXSTEPS+3
+					if not stop:
+						self.committeeVote(tau_final, r) # do not run committee vote or its parts in a seperate thread
+					self.rinfo.step = 3 # TODO see if consistency is maintained in messages
+				for i in range(0,3):
+					self.rinfo.step += 1
+					if not stop:
+						self.committeeVote(tau_step, r)
+				return r
+			self.rinfo.step+=1
+			if not stop:
+				self.committeeVote(tau_step, r)
+			r = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step)
+			if r == -1:
+				r = empty_hash
+			elif r == empty_hash:
+				for i in range(0,3):
+					self.rinfo.step += 1
+					if not stop:
+						self.committeeVote(tau_step, r)
+				return r
+			self.rinfo.step += 1
+			if not stop:
+				self.committeeVote(tau_step, r)
+			r, cc = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step, True)
+			if r== -1:
+				if cc == 0:
+					r = empty_hash
+				else: 
+					r = blkhash
+			self.rinfo.step += 1
+		return 0
+		# assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
+
+	def node_main(self):
+		global barrier
+		print("node {} is up".format(self.nid))
+		print("node {} init with {} stakes and connected to {}".format(self.nid, self.stake, [l.endpoint for l in self.conn]), file=self.f)
+		tr = threading.Thread(target=self.recv)
+		tr.start()
+		ts = threading.Thread(target=self.send)
+		ts.start()
+		while True:
+			vrf_output, j = self.sortition(tau_proposer)
+			hp, idx = self.highest_priority(vrf_output, j)
+			if (j>0):
+				mesg = self.gen_prio_mesg(vrf_output, j, hp)
+				self.gossip(mesg)
+				# print ("{} is proposer for round {}".format(self.nid, self.rinfo.round_num))
+			time.sleep(lambda_proposer)
+			# update to maxprio will stop as lambda proposer has passed in sleep. 
+			time.sleep(lambda_blk)
+			self.rinfo.step+=1
+			hblock = self.reduction(self.rinfo.blkhash, j>0)
+			hblock_ = self.binaryBA(hblock, j>0)
+			r = self.countVotes(3+MAXSTEPS, threshold_final, tau_final, lambda_step)
+			blk = None
+			if (hblock_ == r):
+				blk = Block(self.rinfo.prevhash, calc_SHA256(r), 1) # rnd number = sha of block hash
+			elif hblock_ == bytes(32):
+				blk = Block(self.rinfo.prevhash, bytes(32), 0)
+			else:
+				blk = Block(self.rinfo.prevhash, calc_SHA256(hblock_), 0)
+			print("\npriority messages received during round {}".format(self.rinfo.round_num), file=self.f)
+			for key, val in self.rinfo.prio_recv.items():
+				print("priority = {}, vrf_output = {}, sub_user_idx = {} by {}".format(key, val[0].vrf_output[0:8], val[0].sub_userid, val[1]), file=self.f)
+			print("\nBlock proposal messages received during round {}".format(self.rinfo.round_num), file=self.f)
+			for key, val in self.rinfo.blk_recv.items():
+				print("block hash = {}, priority = {}, prevhash = {} by {}".format(key[0:8], val[0].prio_pl.priority, val[0].prevhash[0:8], val[1]), file=self.f)
+			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=0 else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
+			self.rsem.acquire()
+			self.blockchain.append(blk)
+			if hblock_ == bytes(32):
+				self.rinfo = RoundInfo(calc_SHA256(blk.header+blk.data), self.rinfo.round_num+1)
+			else:
+				self.rinfo = RoundInfo(hblock_, self.rinfo.round_num+1)
+			self.rsem.release()
+			barrier.sem_wait(self.nid)
+
+class Byznatine(Node):
+
+	def __init__(self, nid):
+		self.mode = 0
+		self.vhash = None
+		Node.__init__(self, nid)
+
+	def process(self, mesg, sender):
+		# returns a bool which tells whether to propogate further
+		self.seen_mesg.add((mesg.mesg_seq, mesg.OP))
+		notme = mesg.OP!=self.nid
+		self.rsem.acquire()
+		if(mesg.payload.type == 0):
+			# priority message
+			if(time.time() > self.rinfo.rtime_st + lambda_proposer):
+				self.rsem.release()
+				return 1 & notme
+			if(mesg.payload.round == self.rinfo.round_num):  # EXTRA next round mesg?
+				self.rinfo.prio_recv[mesg.payload.priority] = (mesg.payload, mesg.OP)
+				if (mesg.payload.priority < self.rinfo.maxprio):
+					self.rinfo.maxprio = mesg.payload.priority
+					self.rinfo.mpuid = (mesg.OP, mesg.payload.sub_userid)
+					self.rsem.release()
+					return 1 & notme
+			self.rsem.release()
+			return 0 # discards message with now priority than max prio seen 
+		if(mesg.payload.type == 1):
+			# Block proposal message
+			if(time.time() > self.rinfo.rtime_st + lambda_proposer+lambda_blk):
+				self.rsem.release()
+				return 1 & notme
+			if(mesg.payload.prio_pl.round == self.rinfo.round_num):
+				self.rinfo.blk_recv[mesg.payload.blkhash] = (mesg.payload, mesg.OP)
+				if (mesg.payload.prio_pl.priority < self.rinfo.blkprio):
+					self.rinfo.blkprio = mesg.payload.prio_pl.priority
+					self.rinfo.blkhash = mesg.payload.blkhash
+					self.rsem.release()
+					adv = self.mode==0 or self.vhash==mesg.payload.blkhash
+					return 1 & notme & adv
+			self.rsem.release()
+			return 0
+		if(mesg.payload.type == 2):
+			# vote message
+			if(mesg.payload.round_num == self.rinfo.round_num):
+				self.rinfo.inc_mesg[mesg.payload.step].put(mesg)
+				print("received {} votes for {} in round {} & step {} by {}".format(mesg.payload.num_votes, mesg.payload.blkhash[0:8], mesg.payload.round_num, mesg.payload.step, mesg.OP), file=self.f)
+			self.rsem.release()
+			adv = self.mode==0 or self.vhash==mesg.payload.blkhash
+			return 1 & notme & adv
+		self.rsem.release()
+		assert(False)
+
+	def reduction(self, blkhash):
+		global tau_step, threshold_step
+		self.committeeVote(tau_step, blkhash)
+		h1hash = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step+lambda_blk) # TODO confirm the wait time in paper/assign
+		if h1hash == -1:
+			h1hash = bytes(32)
+		self.rinfo.step += 1
+		self.committeeVote(tau_step, blkhash)
+		h2hash = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step) # TODO above
+		self.rinfo.step += 1
+		if h2hash==-1:
+			return bytes(32)
+		return h2hash
+
+	def binaryBA(self, blkhash):
+		global MAXSTEPS
+		assert(self.rinfo.step == 3), "error assertion round Number is "+str(self.rinfo.step)
+		r = blkhash
+		empty_hash = bytes(32)
+		while(self.rinfo.step < MAXSTEPS+3):
+			self.committeeVote(tau_step, blkhash)
+			r = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step)
+			if r== -1:
+				r = blkhash
+			elif r != empty_hash:
+				if self.rinfo.step == 3:
+					self.rinfo.step = MAXSTEPS+3
+					self.committeeVote(tau_final, blkhash) # do not run committee vote or its parts in a seperate thread
+					self.rinfo.step = 3 # TODO see if consistency is maintained in messages
+				for i in range(0,3):
+					self.rinfo.step += 1
+					self.committeeVote(tau_step, blkhash)
+				return r
+			self.rinfo.step+=1
+			
+			self.committeeVote(tau_step, blkhash)
+			r = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step)
+			if r == -1:
+				r = empty_hash
+			elif r == empty_hash:
+				for i in range(0,3):
+					self.rinfo.step += 1
+					self.committeeVote(tau_step, blkhash)
+				return r
+			self.rinfo.step += 1
+
+			self.committeeVote(tau_step, blkhash)
+			r, cc = self.countVotes(self.rinfo.step, threshold_step, tau_step, lambda_step, True)
+			if r== -1:
+				if cc == 0:
+					r = empty_hash
+				else: 
+					r = blkhash
+			self.rinfo.step += 1
+		return 0
+		# assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
+
+	def lookout(self):
+		st = time.time()
+		while time.time()<st+lambda_blk:
+			if byz_mesg[2]==self.rinfo.round_num:
+				b = self.prng.randint(0,1)
+				self.vhash = byz_mesg[b].payload.blkhash
+				self.mode = 1
+				return
+			time.sleep(0.05)
+
+
+	def node_main(self):
+		global barrier
+		print("node {} is up".format(self.nid))
+		print("node {} init with {} stakes and connected to {}".format(self.nid, self.stake, [l.endpoint for l in self.conn]), file=self.f)
+		tr = threading.Thread(target=self.recv)
+		tr.start()
+		ts = threading.Thread(target=self.send)
+		ts.start()
+		while True:
+			vrf_output, j = self.sortition(tau_proposer)
+			hp, idx = self.highest_priority(vrf_output, j)
+			if (j>0):
+				mesg = self.gen_prio_mesg(vrf_output, j, hp)
+				self.gossip(mesg)
+				# print ("{} is proposer for round {}".format(self.nid, self.rinfo.round_num))
+			time.sleep(lambda_proposer)
+			# update to maxprio will stop as lambda proposer has passed in sleep. 
+			if (j>0 and hp <= self.rinfo.maxprio):
+				# print ("highest priority in round {} is {} by {} accd to {}".format(self.rinfo.round_num, self.rinfo.maxprio, self.rinfo.mpuid, self.nid))
+				mesg1 = self.gen_blk_mesg(vrf_output, j, hp)
+				mesg2 = self.gen_blk_mesg(vrf_output, j, hp)
+				byz_sem.acquire()
+				if byz_mesg[2]<self.rinfo.round_num:
+					byz_mesg[0] = mesg1
+					byz_mesg[1] = mesg2
+					byz_mesg[2] = self.rinfo.round_num
+				byz_sem.release()
+				self.gossip(mesg1)
+				self.gossip(mesg2)
+			tl = threading.Thread(target=self.lookout)
+			tl.start()
+			time.sleep(lambda_blk)
+			tl.join(0.001)
+			self.rinfo.step+=1
+			hblock = self.reduction(self.rinfo.blkhash)
+			hblock_ = self.binaryBA(self.rinfo.blkhash)
+			r = self.countVotes(3+MAXSTEPS, threshold_final, tau_final, lambda_step)
+			blk = None
+			if (hblock_ == r):
+				blk = Block(self.rinfo.prevhash, calc_SHA256(r), 1) # rnd number = sha of block hash
+			elif hblock_ == bytes(32):
+				blk = Block(self.rinfo.prevhash, bytes(32), 0)
+			else:
+				blk = Block(self.rinfo.prevhash, calc_SHA256(hblock_), 0)
+			print("\npriority messages received during round {}".format(self.rinfo.round_num), file=self.f)
+			for key, val in self.rinfo.prio_recv.items():
+				print("priority = {}, vrf_output = {}, sub_user_idx = {} by {}".format(key, val[0].vrf_output[0:8], val[0].sub_userid, val[1]), file=self.f)
+			print("\nBlock proposal messages received during round {}".format(self.rinfo.round_num), file=self.f)
+			for key, val in self.rinfo.blk_recv.items():
+				print("block hash = {}, priority = {}, prevhash = {} by {}".format(key[0:8], val[0].prio_pl.priority, val[0].prevhash[0:8], val[1]), file=self.f)
+			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=0 else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
+			self.rsem.acquire()
+			self.blockchain.append(blk)
+			if hblock_ == bytes(32):
+				self.rinfo = RoundInfo(calc_SHA256(blk.header+blk.data), self.rinfo.round_num+1)
+			else:
+				self.rinfo = RoundInfo(hblock_, self.rinfo.round_num+1)
+			self.mode = 0
+			self.vhash = None
+			self.rsem.release()
+			barrier.sem_wait(self.nid)
 
 def dead_thr_collector():
 	# run on a seperate thread
@@ -517,8 +816,6 @@ def constr_network(rem):
 
 if __name__ == '__main__':
 	fillchoose()
-	print (choose)
-	exit()
 	rem = [0]*N
 	sum = 0
 	sn = None
