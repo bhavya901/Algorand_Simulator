@@ -1,0 +1,11 @@
+main function creates N (number of nodes) threads, each of which runs the logic for Nth node. each of the node can be of  type Node(honest node), FailStop (fail stop adversary) and Byzantine(Byzantine adversary). 
+
+each node creates two additional threads for sending and receiving messages. messages are transmitted by passing the reference of the message into the receive queue of the receiver queue. 
+
+there are 3 types of messages. priority(priority of the subuser), Block(block proposal), vote (generated during BA*) messages. 
+
+on receiving the priority message node updates the highest priority received so far.
+on receiving the Block message node updates the highest priority block received so far and save it.
+
+
+Context of the round is captured by the object of the class RoundInfo. which is updated atomically by use of semaphore at the end of the round. 

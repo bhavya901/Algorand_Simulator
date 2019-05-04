@@ -48,16 +48,17 @@ N = 10 # number of node
 gblprng, glbround = random.Random(), 1
 node = []
 mu_blk, sigma_blk, mu_nonblk, sigma_nonblk = 200, 400, 30, 64
-tau_proposer, tau_step, tau_final = 20, 20, 20 # TODO
-lambda_proposer, lambda_blk, lambda_step =  10, 10, 10
+tau_proposer, tau_step, tau_final = 5, 15, 20 # TODO
+lambda_proposer, lambda_blk, lambda_step =  10, 20, 10
 threshold_step, threshold_final = 0.67, 0.67 # TODO
 sum_stakes = 0
-MAXSTEPS = 15
+MAXSTEPS = 10
 brexit = False
 barrier = Barrier()
 temp_threads = queue.Queue(0)
 byz_mesg = [None, None, 0]
 byz_sem = Semaphore(1)
+f = 0.1
 
 def calc_SHA256(s):
 	# s = bytes
@@ -151,7 +152,7 @@ class RoundInfo:
 		self.mpuid = -1
 		
 		self.rtime_st = time.time()
-		self.inc_mesg = [queue.Queue(0) for i in range(0, 4+MAXSTEPS)] # sem not needed to access
+		self.inc_mesg = [queue.Queue(0) for i in range(0, 8+MAXSTEPS)] # sem not needed to access
 		self.blkprio = ((1<<256)-1).to_bytes(32, 'little')
 		self.blkhash = bytes(32) # max priority payload till now
 		# for documentation purposes
@@ -396,7 +397,7 @@ class Node:
 				else: 
 					r = blkhash
 			self.rinfo.step += 1
-		return 0
+		return b'0'
 		# assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
 
 	def node_main(self):
@@ -438,7 +439,7 @@ class Node:
 			print("\nBlock proposal messages received during round {}".format(self.rinfo.round_num), file=self.f)
 			for key, val in self.rinfo.blk_recv.items():
 				print("block hash = {}, priority = {}, prevhash = {} by {}".format(key[0:8], val[0].prio_pl.priority, val[0].prevhash[0:8], val[1]), file=self.f)
-			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=0 else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
+			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=b'0' else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
 			self.rsem.acquire()
 			self.blockchain.append(blk)
 			if hblock_ == bytes(32):
@@ -538,12 +539,12 @@ class FailStop(Node):
 				else: 
 					r = blkhash
 			self.rinfo.step += 1
-		return 0
+		return b'0'
 		# assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
 
 	def node_main(self):
 		global barrier
-		print("node {} is up".format(self.nid))
+		print("FailStop node {} is up".format(self.nid))
 		print("node {} init with {} stakes and connected to {}".format(self.nid, self.stake, [l.endpoint for l in self.conn]), file=self.f)
 		tr = threading.Thread(target=self.recv)
 		tr.start()
@@ -576,7 +577,7 @@ class FailStop(Node):
 			print("\nBlock proposal messages received during round {}".format(self.rinfo.round_num), file=self.f)
 			for key, val in self.rinfo.blk_recv.items():
 				print("block hash = {}, priority = {}, prevhash = {} by {}".format(key[0:8], val[0].prio_pl.priority, val[0].prevhash[0:8], val[1]), file=self.f)
-			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=0 else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
+			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=b'0' else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
 			self.rsem.acquire()
 			self.blockchain.append(blk)
 			if hblock_ == bytes(32):
@@ -692,7 +693,7 @@ class Byznatine(Node):
 				else: 
 					r = blkhash
 			self.rinfo.step += 1
-		return 0
+		return b'0'
 		# assert (False), "No Consensus reached in node "+str(self.nid)# no Consensus
 
 	def lookout(self):
@@ -708,7 +709,7 @@ class Byznatine(Node):
 
 	def node_main(self):
 		global barrier
-		print("node {} is up".format(self.nid))
+		print("Byznatine node {} is up".format(self.nid))
 		print("node {} init with {} stakes and connected to {}".format(self.nid, self.stake, [l.endpoint for l in self.conn]), file=self.f)
 		tr = threading.Thread(target=self.recv)
 		tr.start()
@@ -756,7 +757,7 @@ class Byznatine(Node):
 			print("\nBlock proposal messages received during round {}".format(self.rinfo.round_num), file=self.f)
 			for key, val in self.rinfo.blk_recv.items():
 				print("block hash = {}, priority = {}, prevhash = {} by {}".format(key[0:8], val[0].prio_pl.priority, val[0].prevhash[0:8], val[1]), file=self.f)
-			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=0 else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
+			print ("\n{} Consensus acheived on block hash {} in round {}".format("FINAL" if blk.typec==1 else ("TENTATIVE" if hblock_!=b'0' else "NO"), hblock_, self.rinfo.round_num), file=self.f, flush=True)
 			self.rsem.acquire()
 			self.blockchain.append(blk)
 			if hblock_ == bytes(32):
@@ -821,6 +822,10 @@ if __name__ == '__main__':
 	sn = None
 	print ("initializing nodes")
 	for i in range(0, N):
+		# rn = gblprng.uniform(0,1)
+		# if (rn<=f):
+		# 	nd = FailStop(i)
+		# else:
 		nd = Node(i)
 		node.append(nd)
 		rem[i] = nd.m

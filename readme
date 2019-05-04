@@ -1,0 +1,16 @@
+project submitted by:
+
+	Bhavya Choudhary 150050028
+	Shruti Hiray 14D070016
+	Shraddheya Shendre 150050018
+
+to run the simulation execute 
+	python3 ASim.py
+
+change the parameters of the simulator by changing the global variables which begins from line 46. We have followed the variable names as written in the desciption pdf of the project. 
+
+be sure that there is a folder name log in the current directory when you run the simulator. The log files are saved in that folder with file name log_<node_id>.txt.
+
+requires the library hashlib and ecdsa.
+
+
